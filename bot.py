@@ -85,6 +85,16 @@ class AttractionStorage:
         ]
         return cls(attractions)
 
+    def all(self) -> List[Attraction]:
+        """Возвращает список всех достопримечательностей."""
+
+        return list(self._items.values())
+
+    def get(self, identifier: str) -> Attraction | None:
+        """Возвращает конкретную достопримечательность по идентификатору."""
+
+        return self._items.get(identifier)
+
 
 def build_main_menu_keyboard() -> InlineKeyboardMarkup:
     """Создаёт клавиатуру главного меню."""
@@ -143,16 +153,6 @@ async def send_main_menu(
 
     if update.message:
         await update.message.reply_text(text, reply_markup=keyboard)
-
-    def all(self) -> List[Attraction]:
-        """Возвращает список всех достопримечательностей."""
-
-        return list(self._items.values())
-
-    def get(self, identifier: str) -> Attraction | None:
-        """Возвращает конкретную достопримечательность по идентификатору."""
-
-        return self._items.get(identifier)
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -267,6 +267,19 @@ async def attraction_details(update: Update, context: ContextTypes.DEFAULT_TYPE)
         context.user_data["photo_message_id"] = photo_message.message_id
 
 
+async def log_application_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Логирует любые ошибки, возникающие при обработке обновлений."""
+
+    if context.error:
+        logger.error(
+            "Произошла ошибка при обработке обновления %s",
+            update,
+            exc_info=(type(context.error), context.error, context.error.__traceback__),
+        )
+    else:
+        logger.error("Произошла ошибка без исключения при обработке обновления %s", update)
+
+
 async def handle_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Обрабатывает нажатия на кнопки главного меню."""
 
@@ -312,6 +325,8 @@ def build_application(storage: AttractionStorage) -> Application:
     application.add_handler(CommandHandler("attractions", show_attractions))
     application.add_handler(CallbackQueryHandler(handle_menu, pattern=r"^menu:"))
     application.add_handler(CallbackQueryHandler(attraction_details, pattern=r"^attraction:"))
+    # Добавляем обработчик для логирования всех необработанных ошибок
+    application.add_error_handler(log_application_error)
 
     return application
 
