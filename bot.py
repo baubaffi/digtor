@@ -14,6 +14,7 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.constants import ParseMode
 from telegram.ext import (Application, CallbackQueryHandler, CommandHandler,
                           ContextTypes)
+from telegram.error import TelegramError
 
 # Включаем логирование для удобной отладки и мониторинга
 logging.basicConfig(
@@ -33,6 +34,7 @@ class Attraction:
     address: str
     latitude: float
     longitude: float
+    image_url: str
 
     @property
     def map_link(self) -> str:
@@ -77,10 +79,70 @@ class AttractionStorage:
                 address=item["address"],
                 latitude=float(item["coordinates"]["lat"]),
                 longitude=float(item["coordinates"]["lon"]),
+                image_url=item["image_url"],
             )
             for item in payload
         ]
         return cls(attractions)
+
+
+def build_main_menu_keyboard() -> InlineKeyboardMarkup:
+    """Создаёт клавиатуру главного меню."""
+
+    return InlineKeyboardMarkup(
+        [
+            [InlineKeyboardButton(text="📍 Достопримечательности", callback_data="menu:attractions")],
+            [InlineKeyboardButton(text="ℹ️ Советы по использованию", callback_data="menu:help")],
+        ]
+    )
+
+
+def build_attractions_keyboard(attractions: List[Attraction]) -> InlineKeyboardMarkup:
+    """Создаёт клавиатуру со списком достопримечательностей."""
+
+    buttons = [
+        [InlineKeyboardButton(text=item.name, callback_data=f"attraction:{item.identifier}")]
+        for item in attractions
+    ]
+    buttons.append([InlineKeyboardButton(text="⬅️ Назад в меню", callback_data="menu:main")])
+    return InlineKeyboardMarkup(buttons)
+
+
+async def delete_previous_photo(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> None:
+    """Удаляет ранее отправленную фотографию, если она ещё есть в чате."""
+
+    message_id = context.user_data.pop("photo_message_id", None)
+    if not message_id:
+        return
+
+    try:
+        await context.bot.delete_message(chat_id=chat_id, message_id=message_id)
+    except TelegramError as exc:  # pragma: no cover - зависит от взаимодействия с API
+        logger.debug("Не удалось удалить старую фотографию: %s", exc)
+
+
+async def send_main_menu(
+    update: Update, context: ContextTypes.DEFAULT_TYPE, *, via_callback: bool = False
+) -> None:
+    """Отображает главное меню с кнопками навигации."""
+
+    keyboard = build_main_menu_keyboard()
+    text = (
+        "Здравствуйте, {name}! Я виртуальный гид проекта «Цифровой Торжокъ».\n"
+        "С моей помощью вы узнаете историю главных достопримечательностей и сразу получите ссылки на карты.\n"
+        "Выберите раздел на кнопках ниже, чтобы начать путешествие по городу."
+    ).format(name=update.effective_user.first_name if update.effective_user else "")
+
+    chat = update.effective_chat
+    if chat is not None:
+        await delete_previous_photo(context, chat.id)
+
+    if via_callback and update.callback_query:
+        await update.callback_query.edit_message_text(text, reply_markup=keyboard)
+        return
+
+    if update.message:
+        await update.message.reply_text(text, reply_markup=keyboard)
 
     def all(self) -> List[Attraction]:
         """Возвращает список всех достопримечательностей."""
@@ -96,25 +158,23 @@ class AttractionStorage:
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Обрабатывает команду /start и приветствует пользователя."""
 
-    user_name = update.effective_user.first_name if update.effective_user else ""
-    text = (
-        "Здравствуйте, {name}! Добро пожаловать в проект «Цифровой Торжокъ».\n"
-        "Я помогу вам узнать о достопримечательностях города и проложить маршрут.\n"
-        "Используйте команду /attractions, чтобы открыть список объектов."
-    ).format(name=user_name)
-    await update.message.reply_text(text)
+    await send_main_menu(update, context)
 
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Обрабатывает команду /help и выводит подсказку."""
 
     help_text = (
-        "Доступные команды:\n"
-        "/start — приветствие и краткая информация о боте;\n"
-        "/attractions — список достопримечательностей;\n"
-        "Нажмите на интересующий объект, чтобы получить подробности и ссылки на карту."
+        "Чтобы познакомиться с Торжком, используйте кнопки главного меню.\n"
+        "Кнопка «Достопримечательности» покажет список объектов с маршрутами, а «Советы по использованию» — подсказки по работе с ботом.\n"
+        "Если вы хотите вернуться к началу, просто нажмите «Назад в меню»."
     )
-    await update.message.reply_text(help_text)
+
+    if update.message:
+        chat = update.effective_chat
+        if chat is not None:
+            await delete_previous_photo(context, chat.id)
+        await update.message.reply_text(help_text, reply_markup=build_main_menu_keyboard())
 
 
 async def show_attractions(
@@ -126,22 +186,29 @@ async def show_attractions(
     attractions = storage.all()
 
     if not attractions:
-        await update.message.reply_text(
-            "Извините, список достопримечательностей пока пуст. Попробуйте позже."
-        )
+        if update.callback_query and update.callback_query.message:
+            await update.callback_query.edit_message_text(
+                "Извините, список достопримечательностей пока пуст. Попробуйте позже."
+            )
+        elif update.message:
+            await update.message.reply_text(
+                "Извините, список достопримечательностей пока пуст. Попробуйте позже."
+            )
         return
 
-    # Формируем кнопки с названием каждой достопримечательности
-    keyboard = [
-        [InlineKeyboardButton(text=item.name, callback_data=f"attraction:{item.identifier}")]
-        for item in attractions
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
+    reply_markup = build_attractions_keyboard(attractions)
+    text = "Выберите достопримечательность, чтобы узнать подробности и увидеть фотографию:"
 
-    await update.message.reply_text(
-        "Выберите достопримечательность, чтобы узнать подробности:",
-        reply_markup=reply_markup,
-    )
+    chat = update.effective_chat
+    if chat is not None:
+        await delete_previous_photo(context, chat.id)
+
+    if update.callback_query and update.callback_query.message:
+        await update.callback_query.edit_message_text(text, reply_markup=reply_markup)
+        return
+
+    if update.message:
+        await update.message.reply_text(text, reply_markup=reply_markup)
 
 
 async def attraction_details(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -170,15 +237,61 @@ async def attraction_details(update: Update, context: ContextTypes.DEFAULT_TYPE)
         "",
         attraction.description,
         "",
-        f"<a href='{attraction.map_link}'>Точка на карте</a>",
-        f"<a href='{attraction.route_link}'>Построить маршрут</a>",
+        "Выберите действие на кнопках ниже:",
     ]
+
+    keyboard = InlineKeyboardMarkup(
+        [
+            [InlineKeyboardButton(text="🗺 Открыть на карте", url=attraction.map_link)],
+            [InlineKeyboardButton(text="🚗 Маршрут на Яндекс.Картах", url=attraction.route_link)],
+            [InlineKeyboardButton(text="⬅️ Назад к списку", callback_data="menu:attractions")],
+        ]
+    )
 
     await query.edit_message_text(
         "\n".join(message_lines),
         parse_mode=ParseMode.HTML,
+        reply_markup=keyboard,
         disable_web_page_preview=True,
     )
+
+    if query.message and query.message.chat:
+        chat_id = query.message.chat.id
+        await delete_previous_photo(context, chat_id)
+        photo_message = await context.bot.send_photo(
+            chat_id=chat_id,
+            photo=attraction.image_url,
+            caption=attraction.name,
+            parse_mode=ParseMode.HTML,
+        )
+        context.user_data["photo_message_id"] = photo_message.message_id
+
+
+async def handle_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Обрабатывает нажатия на кнопки главного меню."""
+
+    query = update.callback_query
+    if query is None or query.data is None:
+        return
+
+    await query.answer()
+    _, _, action = query.data.partition(":")
+
+    if action == "main":
+        if query.message and query.message.chat:
+            await delete_previous_photo(context, query.message.chat.id)
+        await send_main_menu(update, context, via_callback=True)
+    elif action == "attractions":
+        await show_attractions(update, context)
+    elif action == "help":
+        if query.message and query.message.chat:
+            await delete_previous_photo(context, query.message.chat.id)
+        help_text = (
+            "Используйте кнопки для навигации по боту.\n"
+            "В разделе «Достопримечательности» можно открыть карту и построить маршрут.\n"
+            "Возвращайтесь в меню, чтобы выбрать новый объект или прочитать подсказки ещё раз."
+        )
+        await query.edit_message_text(help_text, reply_markup=build_main_menu_keyboard())
 
 
 def build_application(storage: AttractionStorage) -> Application:
@@ -197,6 +310,7 @@ def build_application(storage: AttractionStorage) -> Application:
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CommandHandler("attractions", show_attractions))
+    application.add_handler(CallbackQueryHandler(handle_menu, pattern=r"^menu:"))
     application.add_handler(CallbackQueryHandler(attraction_details, pattern=r"^attraction:"))
 
     return application
